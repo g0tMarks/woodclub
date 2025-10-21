@@ -1,7 +1,6 @@
 -- ---------- Base / Extensions ----------
 CREATE SCHEMA IF NOT EXISTS app;
 
--- UUIDs via uuid-ossp
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ---------- ENUM Types ----------
@@ -12,8 +11,8 @@ CREATE TYPE app.delivery_status     AS ENUM ('scheduled', 'completed', 'skipped'
 -- ---------- Customers ----------
 CREATE TABLE IF NOT EXISTS app.customers (
     customer_id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    customer_name       TEXT NOT NULL,                 -- person or household name
-    email               TEXT UNIQUE,                    -- optional but unique when present
+    customer_name       TEXT NOT NULL,
+    email               TEXT UNIQUE,
     phone               TEXT,
     address_line1       TEXT,
     address_line2       TEXT,
@@ -21,15 +20,12 @@ CREATE TABLE IF NOT EXISTS app.customers (
     state               TEXT,
     postcode            TEXT,
     country             TEXT DEFAULT 'Australia',
-    -- Stripe linkage
     stripe_customer_id  TEXT UNIQUE,
-    -- housekeeping
     is_enabled          BOOLEAN NOT NULL DEFAULT TRUE,
     created_at          TIMESTAMP NOT NULL DEFAULT now(),
     updated_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- basic search/indexes
 CREATE INDEX IF NOT EXISTS idx_customers_name ON app.customers(customer_name);
 CREATE INDEX IF NOT EXISTS idx_customers_email ON app.customers(email);
 
@@ -39,7 +35,7 @@ CREATE TABLE IF NOT EXISTS app.admins (
     name            TEXT NOT NULL,
     email           TEXT NOT NULL UNIQUE,
     hashed_password TEXT NOT NULL,
-    role            TEXT NOT NULL DEFAULT 'admin', -- simple role field for now
+    role            TEXT NOT NULL DEFAULT 'admin',
     is_enabled      BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
@@ -49,29 +45,26 @@ CREATE TABLE IF NOT EXISTS app.admins (
 CREATE TABLE IF NOT EXISTS app.subscriptions (
     subscription_id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     customer_id             UUID NOT NULL REFERENCES app.customers(customer_id) ON DELETE CASCADE,
-    plan_name               TEXT NOT NULL,             -- e.g., "Yearly"
-    quantity_m3             NUMERIC(6,3) NOT NULL,     -- cubic meters per delivery
-    cadence_days            INT NOT NULL,              -- e.g., 30, 90
+    plan_name               TEXT NOT NULL,                 -- e.g. "Quarterly 1 tonne"
+    quantity_tonnes         NUMERIC(6,3) NOT NULL,         -- wood volume
+    flat_rate_cents         BIGINT NOT NULL,               -- base price per tonne (AUD cents)
+    cadence_days            INT NOT NULL,                  -- e.g. 30 or 90 days
     status                  app.subscription_status NOT NULL DEFAULT 'active',
-    next_delivery_date      DATE,                      -- used by admin dashboard
+    next_delivery_date      DATE,
     start_date              DATE NOT NULL DEFAULT CURRENT_DATE,
-    end_date                DATE,                      -- optional (canceled/ended)
-    -- Stripe linkage
+    end_date                DATE,
     stripe_subscription_id  TEXT UNIQUE,
-    -- free-form config (delivery instructions, stacking preferences, etc.)
     config                  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    -- housekeeping
     is_enabled              BOOLEAN NOT NULL DEFAULT TRUE,
     created_at              TIMESTAMP NOT NULL DEFAULT now(),
     updated_at              TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- Foreign key indexes & useful filters
-CREATE INDEX IF NOT EXISTS idx_subscriptions_customer_id  ON app.subscriptions(customer_id);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_status       ON app.subscriptions(status);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_next_date    ON app.subscriptions(next_delivery_date);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_customer_id ON app.subscriptions(customer_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON app.subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_next_date ON app.subscriptions(next_delivery_date);
 
--- Business rule: one active subscription per customer (adjust if you want to allow multiple)
+-- Optional: Only one active subscription per customer
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_subscription_per_customer
     ON app.subscriptions(customer_id)
     WHERE status = 'active';
@@ -81,43 +74,47 @@ CREATE TABLE IF NOT EXISTS app.deliveries (
     delivery_id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     subscription_id     UUID NOT NULL REFERENCES app.subscriptions(subscription_id) ON DELETE CASCADE,
     scheduled_date      DATE NOT NULL,
-    delivered_at        TIMESTAMP,                     -- when completed
+    delivered_at        TIMESTAMP,
     status              app.delivery_status NOT NULL DEFAULT 'scheduled',
-    quantity_m3         NUMERIC(6,3) NOT NULL,         -- actual delivered quantity
-    notes               TEXT,                          -- driver/admin notes (e.g., stacking location)
-    -- housekeeping
+
+    -- --- Cost fields ---
+    base_cost_cents     BIGINT DEFAULT 0,                  -- derived from subscription flat_rate
+    delivery_hours      NUMERIC(4,2) DEFAULT 0,            -- e.g. 1.50 hours
+    stacking_hours      NUMERIC(4,2) DEFAULT 0,
+    delivery_fee_cents  BIGINT GENERATED ALWAYS AS (delivery_hours * 50 * 100) STORED,
+    stacking_fee_cents  BIGINT GENERATED ALWAYS AS (stacking_hours * 50 * 100) STORED,
+    total_cost_cents    BIGINT GENERATED ALWAYS AS (base_cost_cents + delivery_fee_cents + stacking_fee_cents) STORED,
+
+    notes               TEXT,
     created_at          TIMESTAMP NOT NULL DEFAULT now(),
     updated_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_deliveries_subscription_id ON app.deliveries(subscription_id);
-CREATE INDEX IF NOT EXISTS idx_deliveries_status          ON app.deliveries(status);
-CREATE INDEX IF NOT EXISTS idx_deliveries_schedule        ON app.deliveries(scheduled_date);
+CREATE INDEX IF NOT EXISTS idx_deliveries_status ON app.deliveries(status);
+CREATE INDEX IF NOT EXISTS idx_deliveries_schedule ON app.deliveries(scheduled_date);
 
 -- ---------- Payments ----------
 CREATE TABLE IF NOT EXISTS app.payments (
-    payment_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    subscription_id     UUID NOT NULL REFERENCES app.subscriptions(subscription_id) ON DELETE CASCADE,
-    amount_cents        BIGINT NOT NULL,               -- store money in integer cents (avoid FP issues)
-    currency            TEXT NOT NULL DEFAULT 'AUD',
-    status              app.payment_status NOT NULL DEFAULT 'pending',
-    -- Stripe linkage
-    stripe_invoice_id   TEXT UNIQUE,
+    payment_id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    subscription_id          UUID NOT NULL REFERENCES app.subscriptions(subscription_id) ON DELETE CASCADE,
+    delivery_id              UUID REFERENCES app.deliveries(delivery_id) ON DELETE SET NULL,
+    amount_cents             BIGINT NOT NULL,
+    currency                 TEXT NOT NULL DEFAULT 'AUD',
+    status                   app.payment_status NOT NULL DEFAULT 'pending',
+    stripe_invoice_id        TEXT UNIQUE,
     stripe_payment_intent_id TEXT UNIQUE,
-    -- derived dates
-    invoice_date        TIMESTAMP,                     -- when Stripe created invoice
-    paid_at             TIMESTAMP,                     -- when paid/settled
-    -- housekeeping
-    created_at          TIMESTAMP NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMP NOT NULL DEFAULT now()
+    invoice_date             TIMESTAMP,
+    paid_at                  TIMESTAMP,
+    created_at               TIMESTAMP NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMP NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_subscription_id ON app.payments(subscription_id);
-CREATE INDEX IF NOT EXISTS idx_payments_status          ON app.payments(status);
-CREATE INDEX IF NOT EXISTS idx_payments_created_at      ON app.payments(created_at);
+CREATE INDEX IF NOT EXISTS idx_payments_delivery_id ON app.payments(delivery_id);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON app.payments(status);
 
--- ---------- Helpful updated_at trigger (optional, but handy) ----------
--- If you prefer DB-managed updated_at, keep this; otherwise manage in app layer.
+-- ---------- updated_at trigger ----------
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'app_set_updated_at') THEN
@@ -138,7 +135,7 @@ BEGIN
         BEGIN
             IF NOT EXISTS (
                 SELECT 1
-                FROM   pg_trigger
+                FROM pg_trigger
                 WHERE  tgname = %L
             ) THEN
                 CREATE TRIGGER %I
