@@ -9,16 +9,17 @@ WHERE subscription_id = @subscription_id::uuid;
 
 -- name: CreateSubscription :one
 INSERT INTO app.subscriptions
-(customer_id, plan_name, quantity_m3, delivery_month, status, next_delivery_date, start_date, stripe_subscription_id, config)
+(customer_id, plan_name, quantity_tonnes, flat_rate_cents, delivery_month, status, next_delivery_date, start_date, stripe_subscription_id, config)
 VALUES
-(@customer_id::uuid, @plan_name, @quantity_m3, @delivery_month, @status::app.subscription_status,
+(@customer_id::uuid, @plan_name, @quantity_tonnes, @flat_rate_cents, @delivery_month, @status::app.subscription_status,
  @next_delivery_date, @start_date, @stripe_subscription_id, COALESCE(@config::jsonb, '{}'::jsonb))
 RETURNING *;
 
 -- name: UpdateSubscription :one
 UPDATE app.subscriptions
 SET plan_name = @plan_name,
-    quantity_m3 = @quantity_m3,
+    quantity_tonnes = @quantity_tonnes,
+    flat_rate_cents = @flat_rate_cents,
     delivery_month = @delivery_month,
     status = @status::app.subscription_status,
     next_delivery_date = @next_delivery_date,

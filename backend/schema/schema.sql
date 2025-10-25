@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS app.subscriptions (
     plan_name               TEXT NOT NULL,                 -- e.g. "Quarterly 1 tonne"
     quantity_tonnes         NUMERIC(6,3) NOT NULL,         -- wood volume
     flat_rate_cents         BIGINT NOT NULL,               -- base price per tonne (AUD cents)
-    cadence_days            INT NOT NULL,                  -- e.g. 30 or 90 days
+    delivery_month          INT NOT NULL,                  -- e.g. 1 for January, 2 for February, etc.
     status                  app.subscription_status NOT NULL DEFAULT 'active',
     next_delivery_date      DATE,
     start_date              DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS app.deliveries (
     scheduled_date      DATE NOT NULL,
     delivered_at        TIMESTAMP,
     status              app.delivery_status NOT NULL DEFAULT 'scheduled',
+    quantity_tonnes     NUMERIC(6,3),                      -- actual quantity delivered
 
     -- --- Cost fields ---
     base_cost_cents     BIGINT DEFAULT 0,                  -- derived from subscription flat_rate
