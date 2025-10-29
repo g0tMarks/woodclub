@@ -1,0 +1,153 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	// Requires a fully qualified module path
+	//The underscore imports the package as well as runs its init() function
+	"github.com/g0tMarks/woodclub.git/backend/internal/logger"
+	_ "github.com/g0tMarks/woodclub.git/backend/internal/logger"
+	_ "github.com/g0tMarks/woodclub.git/backend/internal/wood"
+	_ "github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+)
+
+func main() {
+	//Logging config
+	os.Setenv("APPENV", "development")
+
+	logger.Log.Info("Starting demo...")
+	logger.Log.Debug("Debugging active")
+
+	// Load .env file manually
+	// Adjust path as needed because by default it looks in the current working directory for .env
+	err := godotenv.Load("../../../.env")
+	if err != nil {
+		fmt.Println("No .env file found, using environment variables")
+		fmt.Printf("%s\n", err)
+	}
+
+	dbURI := os.Getenv("DATABASE_URL")
+	if dbURI == "" {
+		dbURI = "postgres://postgres:mysecretpassword@localhost:5432/test-db?sslmode=disable"
+	}
+
+	fmt.Println("DB URI:", dbURI)
+
+	// Connect to DB
+	// sql.Open() is from lib/pq and requires a driver name "postgres" as the first argument and the URL as the second argument
+	conn, err := sql.Open("postgres", dbURI)
+	if err != nil {
+		log.Fatal("cannot connect to db:", err)
+	}
+
+	//defer the close to the end of main()
+	defer conn.Close()
+
+	// Ping to verify connection
+	if err := conn.Ping(); err != nil {
+		log.Fatal("db ping failed:", err)
+	}
+
+	fmt.Println("Connected to DB")
+
+	//db.New() is from sqlc generated code in internal/db/db.go
+	queries := db.New(conn)
+	// Context for DB operations
+	ctx := context.Background()
+
+	// 1 Create a customer
+	customer, err := queries.CreateCustomer(ctx, "John Smith")
+	if err != nil {
+		log.Fatal("failed to create customer:", err)
+	}
+	fmt.Printf("1. DONE! Created CustomerID: %d and Customer Name: %s\n", customer.CustomerID, customer.CustomerName)
+
+	// 2 Create a facility
+	facility, err := queries.CreateFacility(ctx, db.CreateFacilityParams{
+		Name:    "Main Facility",
+		Address: sql.NullString{String: "456 Warehouse Rd", Valid: true},
+		Region:  sql.NullString{String: "VIC", Valid: true},
+		Config:  []byte(`{"allow24hr": true}`), // JSONB field
+	})
+	if err != nil {
+		log.Fatal("failed to create facility:", err)
+	}
+	fmt.Printf("2. DONE! Created Facility: %d %s\n", facility.FacilityID, facility.Name)
+
+	// 3 Create a unit
+	unit, err := queries.CreateUnit(ctx, db.CreateUnitParams{
+		FacilityID: facility.FacilityID,
+		UnitType:   sql.NullString{String: "Small Locker", Valid: true},
+		Size:       sql.NullString{String: "2x2", Valid: true},
+		Price:      sql.NullString{String: "120.0", Valid: true},
+		Status:     db.AppUnitStatusAvailable, // enum
+	})
+	if err != nil {
+		log.Fatal("failed to create unit:", err)
+	}
+	fmt.Printf("3. DONE! Created Unit: ID %d type: %s status: %s\n", unit.UnitID, unit.UnitType.String, unit.Status.AppUnitStatus)
+
+	// 4 Create an agreement
+
+	agreement, err := queries.CreateAgreement(ctx, db.CreateAgreementParams{
+		CustomerID: customer.CustomerID, // convert UUID to string if struct expects string
+		UnitID:     unit.UnitID,
+		StartDate:  time.Now(),
+		EndDate:    sql.NullTime{Time: time.Now().AddDate(1, 1, 1), Valid: true},
+		Status:     db.AppAgreementStatusActive, // enum
+	})
+	if err != nil {
+		log.Fatal("failed to create agreement:", err)
+	}
+	fmt.Printf("4. DONE! Created Agreement: %d status=%s\n", agreement.AgreementID, agreement.Status.AppAgreementStatus)
+
+	// 5 Create an invoice first
+	invoice, err := queries.CreateInvoice(ctx, db.CreateInvoiceParams{
+		AgreementID: agreement.AgreementID,
+		DueDate:     time.Now().AddDate(0, 1, 0), // 1 month from now
+		Amount:      "120.00",                    // Monthly rent
+		Status:      db.AppInvoiceStatusUnpaid,
+	})
+	if err != nil {
+		log.Fatal("failed to create invoice:", err)
+	}
+	fmt.Printf("5. DONE! Created Invoice: %d amount=%s status=%s\n", invoice.InvoiceID, invoice.Amount, invoice.Status.AppInvoiceStatus)
+
+	// 6 Record a payment for the invoice
+	payment, err := queries.CreatePayment(ctx, db.CreatePaymentParams{
+		InvoiceID:  invoice.InvoiceID, // Now we have a valid invoice_id
+		Method:     sql.NullString{String: "credit_card", Valid: true},
+		GatewayRef: sql.NullString{String: "TXN-12345", Valid: true},
+		Status:     db.AppPaymentStatusCompleted, // enum
+	})
+
+	if err != nil {
+		log.Fatal("failed to create payment:", err)
+	}
+
+	fmt.Printf("6. DONE! Created Payment: %d status=%s\n", payment.PaymentID, payment.Status.AppPaymentStatus)
+
+	// 7 Log a message
+
+	message, err := queries.CreateMessage(ctx, db.CreateMessageParams{
+		CustomerID: customer.CustomerID,
+		Type:       db.AppMessageTypeEmail,         // enum
+		Direction:  db.AppMessageDirectionOutbound, // enum
+		Status:     db.AppMessageStatusSent,        // enum
+	})
+	if err != nil {
+		log.Fatal("failed to create message:", err)
+	}
+	fmt.Printf("7. DONE! Message: %d type=%s status=%s\n", message.MessageID, message.Type.AppMessageType, message.Status.AppMessageStatus)
+
+	// Done
+	fmt.Println("Full demo flow completed successfully.")
+}
